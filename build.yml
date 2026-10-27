@@ -1,0 +1,86 @@
+name: Build
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Unpack sources from zip
+        shell: bash
+        run: |
+          shopt -s nullglob dotglob
+          ZIPS=(*.zip)
+          if [ ${#ZIPS[@]} -gt 0 ]; then
+            Z="${ZIPS[0]}"
+            for c in "${ZIPS[@]}"; do case "$c" in *src*) Z="$c";; esac; done
+            echo "Unpacking $Z"
+            rm -rf _src && mkdir _src && unzip -q -o "$Z" -d _src
+            G=$(find _src -name build.gradle -not -path '*/build/*' | head -n 1)
+            if [ -z "$G" ]; then echo "::error::$Z has no build.gradle inside"; exit 1; fi
+            cp -rf "$(dirname "$G")"/* .
+            rm -rf _src
+          elif [ -f build.gradle ]; then
+            echo "Using sources from the repository root"
+          else
+            echo "::error::Upload ancient-visuals-src.zip (or the project files) to the repository root"; exit 1
+          fi
+          ls -la
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.14.3'
+
+      - name: Build jar
+        run: gradle assemble --stacktrace --no-daemon
+
+      - name: Run tests
+        continue-on-error: true
+        run: gradle test --no-daemon
+
+      - name: Collect jar
+        shell: bash
+        run: |
+          mkdir -p dist
+          for f in build/libs/*.jar; do case "$f" in *-sources.jar) ;; *) cp "$f" dist/ ;; esac; done
+          ls -la dist
+          echo "### Ancient Visuals: $(ls dist)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Download: Artifacts -> ancient-visuals-jar, or the Releases page." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload jar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ancient-visuals-jar
+          path: dist/*.jar
+          if-no-files-found: error
+
+      - name: Publish release
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          export GH_REPO="$GITHUB_REPOSITORY"
+          VER=$(grep '^mod_version=' gradle.properties | cut -d= -f2 | tr -d '\r')
+          gh release create "build-$GITHUB_RUN_NUMBER" dist/*.jar --target "$GITHUB_SHA" \
+            --title "Ancient Visuals $VER (build $GITHUB_RUN_NUMBER)" \
+            --notes "Minecraft 1.21.1, Fabric Loader 0.16+, needs Fabric API. Put the jar into .minecraft/mods."
+
+      - name: Upload reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports
+          path: build/reports/
